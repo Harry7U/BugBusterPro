@@ -29,13 +29,14 @@ const (
 
 // --- Configuration Struct ---
 type Config struct {
-	Domain       string
-	OutputDir    string
-	WordlistPath string // Added for feroxbuster wordlist
-	Force        bool
-	Threads      int // General thread/concurrency hint
-	LogFile      *os.File
-	Logger       *log.Logger
+	Domain             string
+	OutputDir          string
+	WordlistPath       string // Path for feroxbuster wordlist
+	NucleiTemplatesDir string // Path for Nuclei templates base directory
+	Force              bool
+	Threads            int // General thread/concurrency hint
+	LogFile            *os.File
+	Logger             *log.Logger
 }
 
 // --- StepInfo Struct ---
@@ -49,39 +50,40 @@ type StepInfo struct {
 }
 
 // --- Required Tools ---
+// (Keep the list as before, ensuring go, nuclei, feroxbuster, etc. are there)
 var requiredTools = []string{
-	"go", // Need go for installation
-	"subfinder",
-	"httpx",
-	"katana",
-	"waybackurls",
-	"otxurls",
-	"feroxbuster",
-	"nuclei",
-	"subzy",
-	"qsreplace",
-	"gf",
-	"bxss",
-	"sort", // Standard Linux utilities
-	"grep",
-	"cat",
-	"sh",   // Shell is needed for pipes
-	"echo", // Used in one step
+	"go", "subfinder", "httpx", "katana", "waybackurls", "otxurls",
+	"feroxbuster", "nuclei", "subzy", "qsreplace", "gf", "bxss",
+	"sort", "grep", "cat", "sh", "echo",
 }
 
 func main() {
 	// --- Command-Line Flags ---
 	domain := flag.String("domain", "", "Target domain to scan (required)")
 	outputDir := flag.String("output-dir", "output", "Directory to store scan results")
-	// Default wordlist path - adjust if yours is different
-	defaultWordlist := "/usr/share/wordlists/dirb/common.txt"
-	// Check common alternative location
-	if _, err := os.Stat("/usr/share/seclists/Discovery/Web-Content/common.txt"); err == nil {
-		defaultWordlist = "/usr/share/seclists/Discovery/Web-Content/common.txt"
-	}
-	wordlistPath := flag.String("wordlist", defaultWordlist, "Path to wordlist for directory brute-forcing (e.g., feroxbuster)")
+
+	// --- Wordlist Path Logic ---
+	// Start with a basic default, then check preferred locations
+	defaultWordlist := "common.txt" // Fallback if no paths found
+	// Prioritize user-specified snap path
+	snapWordlistPath := "/snap/seclists/current/Discovery/Web-Content/common.txt"
+	usrShareSecListsWordlistPath := "/usr/share/seclists/Discovery/Web-Content/common.txt"
+	usrShareDirbWordlistPath := "/usr/share/wordlists/dirb/common.txt"
+
+	if _, err := os.Stat(snapWordlistPath); err == nil {
+		defaultWordlist = snapWordlistPath
+	} else if _, err := os.Stat(usrShareSecListsWordlistPath); err == nil {
+		defaultWordlist = usrShareSecListsWordlistPath
+	} else if _, err := os.Stat(usrShareDirbWordlistPath); err == nil {
+		defaultWordlist = usrShareDirbWordlistPath
+	} // else: keep the basic "common.txt" or let the user specify
+
+	wordlistPath := flag.String("wordlist", defaultWordlist, "Path to wordlist for directory brute-forcing")
+
+	// --- Nuclei Templates Path ---
+	nucleiTemplatesDir := flag.String("nuclei-templates-dir", "/opt/nuclei-templates/", "Base directory for Nuclei templates")
+
 	force := flag.Bool("force", false, "Force rerun of all steps, even if output files exist")
-	// Reduced default threads for stability/stealth
 	threads := flag.Int("threads", 25, "Default number of threads/concurrency for tools")
 	flag.Parse()
 
@@ -93,11 +95,12 @@ func main() {
 
 	// --- Create Config ---
 	config := Config{
-		Domain:       *domain,
-		OutputDir:    filepath.Clean(*outputDir), // Clean the path
-		WordlistPath: *wordlistPath,
-		Force:        *force,
-		Threads:      *threads,
+		Domain:             *domain,
+		OutputDir:          filepath.Clean(*outputDir),
+		WordlistPath:       *wordlistPath,
+		NucleiTemplatesDir: *nucleiTemplatesDir, // Store the path
+		Force:              *force,
+		Threads:            *threads,
 	}
 
 	// --- Initialization ---
@@ -110,7 +113,7 @@ func main() {
 	// --- Check & Install Tools ---
 	if !checkAndInstallTools(&config) {
 		config.Logger.Println(colorRed + "Required tools check failed. Please install missing tools manually and try again." + colorReset)
-		os.Exit(1) // Exit if essential tools are missing
+		os.Exit(1)
 	}
 
 	// --- Create Directories ---
@@ -140,7 +143,6 @@ func initialize(config *Config) error {
 	logsDir := filepath.Join(config.OutputDir, "logs")
 	err = os.MkdirAll(logsDir, 0755)
 	if err != nil {
-		// Don't use logger here as it's not initialized yet
 		return fmt.Errorf("error creating logs directory %s: %v", logsDir, err)
 	}
 
@@ -151,25 +153,30 @@ func initialize(config *Config) error {
 		return fmt.Errorf("error creating log file %s: %v", logFileName, err)
 	}
 
-	// Create multiwriter to write to both console and file
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	// Use standard log flags
 	logger := log.New(multiWriter, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 
 	config.LogFile = logFile
 	config.Logger = logger
 
-	// Print banner
-	printBanner(config)
+	printBanner(config) // Print banner AFTER logger is set up
 
-	// Check wordlist existence after logger is ready
+	// Check wordlist existence
 	if _, err := os.Stat(config.WordlistPath); os.IsNotExist(err) {
-		config.Logger.Printf(colorYellow+"Warning: Specified wordlist '%s' not found. Directory brute-forcing (Step 11) might fail or use an empty list.", config.WordlistPath+colorReset)
+		config.Logger.Printf(colorYellow+"Warning: Specified wordlist '%s' not found. Directory brute-forcing (Step 10) might fail.", config.WordlistPath+colorReset)
 		config.Logger.Printf(colorYellow+"Use the --wordlist flag to specify the correct path."+colorReset)
-	}
+	} else {
+         config.Logger.Printf("Using wordlist: %s", config.WordlistPath)
+    }
 
-	// Add a note about Nuclei templates
-	config.Logger.Printf(colorYellow+"Note: Ensure Nuclei templates are installed and up-to-date by running: nuclei -update-templates"+colorReset)
+	// Check Nuclei templates directory existence
+	if _, err := os.Stat(config.NucleiTemplatesDir); os.IsNotExist(err) {
+		config.Logger.Printf(colorYellow+"Warning: Specified Nuclei templates directory '%s' not found. Nuclei scans might fail.", config.NucleiTemplatesDir+colorReset)
+		config.Logger.Printf(colorYellow+"Ensure templates are present or use the --nuclei-templates-dir flag. Run 'nuclei -update-templates -td %s' manually if needed.", config.NucleiTemplatesDir+colorReset)
+	} else {
+         config.Logger.Printf("Using Nuclei templates directory: %s", config.NucleiTemplatesDir)
+         config.Logger.Printf(colorYellow+"Note: Ensure Nuclei templates are up-to-date by running: nuclei -update-templates -td %s"+colorReset, config.NucleiTemplatesDir)
+    }
 
 	return nil
 }
@@ -183,50 +190,47 @@ func printBanner(config *Config) {
 ██╔══██╗██║   ██║██║   ██║██╔══██╗██║   ██║╚════██║   ██║   ██╔══╝  ██╔══██╗██╔═══╝ ██╔══██╗██║   ██║
 ██████╔╝╚██████╔╝╚██████╔╝██████╔╝╚██████╔╝███████║   ██║   ███████╗██║  ██║██║     ██║  ██║╚██████╔╝
 ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝
-                                                                                         v1.1.0 (Updated)
+                                                                                         v1.1.1 (Path Update)
 `
-	// Use Println directly for banner to avoid log prefixes
 	fmt.Println(colorCyan + banner + colorReset)
 	config.Logger.Printf("Starting BugBusterPro for domain: %s", config.Domain)
 	config.Logger.Printf("Output directory: %s", config.OutputDir)
-	config.Logger.Printf("Wordlist path: %s", config.WordlistPath)
+	// Don't log WordlistPath/NucleiTemplatesDir here, logged in initialize() after checks
 	config.Logger.Printf("Force rerun: %t", config.Force)
 	config.Logger.Printf("Default Threads/Concurrency: %d", config.Threads)
 	config.Logger.Printf("Log file: %s", config.LogFile.Name())
 }
 
-// --- checkAndInstallTools: Verify required tools are present, attempt installation if missing ---
+// --- checkAndInstallTools: Verify required tools, attempt installation ---
 func checkAndInstallTools(config *Config) bool {
 	config.Logger.Println(colorYellow + "Checking required tools..." + colorReset)
 	allToolsFound := true
-	goInstalled := isToolInstalled("go") // Check for Go first
+	goInstalled := isToolInstalled("go")
 
 	for _, tool := range requiredTools {
 		if !isToolInstalled(tool) {
-			// Don't try to install go itself, or basic utils
 			isGoTool := contains([]string{"subfinder", "httpx", "katana", "waybackurls", "otxurls", "nuclei", "subzy", "qsreplace", "gf", "bxss"}, tool)
-			isInstallable := contains([]string{"feroxbuster"}, tool)
+			isInstallablePkg := contains([]string{"feroxbuster"}, tool) // Tools potentially installed via package manager
 
 			if tool == "go" {
 				config.Logger.Printf(colorRed+"Tool %s not found. Please install Go manually (https://golang.org/doc/install)."+colorReset, tool)
-				allToolsFound = false // Go is critical for installing others
+				allToolsFound = false
 			} else if isGoTool {
 				if !goInstalled {
 					config.Logger.Printf(colorRed+"Tool %s not found, and Go is not installed. Cannot install automatically."+colorReset, tool)
 					allToolsFound = false
 				} else {
-					config.Logger.Printf(colorYellow+"Tool %s not found. Attempting installation..."+colorReset, tool)
-					if !installTool(config, tool) {
-						allToolsFound = false // Mark as failed if install fails
+					config.Logger.Printf(colorYellow+"Tool %s not found. Attempting installation via 'go install'..."+colorReset, tool)
+					if !installTool(config, tool) { // Pass config for nuclei template path
+						allToolsFound = false
 					}
 				}
-			} else if isInstallable {
-				config.Logger.Printf(colorYellow+"Tool %s not found. Attempting installation..."+colorReset, tool)
+			} else if isInstallablePkg {
+				config.Logger.Printf(colorYellow+"Tool %s not found. Attempting installation via package manager or cargo..."+colorReset, tool)
 				if !installTool(config, tool) {
 					allToolsFound = false
 				}
-			} else {
-				// Basic utils like cat, grep, sort, sh should usually be present
+			} else { // Basic utils
 				config.Logger.Printf(colorRed+"Required utility '%s' not found in PATH. Please install it using your system's package manager."+colorReset, tool)
 				allToolsFound = false
 			}
@@ -238,26 +242,26 @@ func checkAndInstallTools(config *Config) bool {
 	if !allToolsFound {
 		config.Logger.Println(colorRed + "One or more required tools are missing or could not be installed." + colorReset)
 	} else {
-		config.Logger.Println(colorGreen + "All required tools are present." + colorReset)
+		config.Logger.Println(colorGreen + "All required tools appear to be present." + colorReset)
 	}
 	return allToolsFound
 }
 
-// --- isToolInstalled: Check if a command exists in the system's PATH ---
+// --- isToolInstalled: Check if command exists in PATH ---
 func isToolInstalled(tool string) bool {
 	_, err := exec.LookPath(tool)
 	return err == nil
 }
 
 // --- installTool: Attempt to install a missing tool ---
-// Returns true on success, false on failure.
 func installTool(config *Config, tool string) bool {
 	config.Logger.Printf("Attempting to install %s...", tool)
-
 	var cmd *exec.Cmd
-	installSuccess := false
+	installSuccess := false // Flag specifically for package manager success
 
+	// Determine the installation command
 	switch tool {
+	// --- Go Tools ---
 	case "subfinder":
 		cmd = exec.Command("go", "install", "-v", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest")
 	case "httpx":
@@ -268,166 +272,171 @@ func installTool(config *Config, tool string) bool {
 		cmd = exec.Command("go", "install", "-v", "github.com/tomnomnom/waybackurls@latest")
 	case "otxurls":
 		cmd = exec.Command("go", "install", "-v", "github.com/lc/otxurls@latest")
-	case "feroxbuster":
-		// Try common package managers first, then cargo
-		if isToolInstalled("apt-get") {
-			config.Logger.Printf("Trying to install feroxbuster using apt-get...")
-			// Use apt-get for potentially non-interactive environments
-			cmd = exec.Command("sudo", "apt-get", "update")
-			if err := runInstallCommand(config, cmd, tool+" (update)"); err == nil {
-				cmd = exec.Command("sudo", "apt-get", "install", "-y", "feroxbuster")
-				if err := runInstallCommand(config, cmd, tool); err == nil {
-					installSuccess = true
-				}
-			}
-		} else if isToolInstalled("yum") {
-			config.Logger.Printf("Trying to install feroxbuster using yum...")
-			// Assuming EPEL might be needed or it's in a standard repo
-			cmd = exec.Command("sudo", "yum", "install", "-y", "feroxbuster")
-			if err := runInstallCommand(config, cmd, tool); err == nil {
-				installSuccess = true
-			}
-		} else if isToolInstalled("dnf") {
-			config.Logger.Printf("Trying to install feroxbuster using dnf...")
-			cmd = exec.Command("sudo", "dnf", "install", "-y", "feroxbuster")
-			if err := runInstallCommand(config, cmd, tool); err == nil {
-				installSuccess = true
-			}
-		} else if isToolInstalled("pacman") {
-			config.Logger.Printf("Trying to install feroxbuster using pacman...")
-			cmd = exec.Command("sudo", "pacman", "-Sy", "--noconfirm", "feroxbuster")
-			if err := runInstallCommand(config, cmd, tool); err == nil {
-				installSuccess = true
-			}
-		} else if isToolInstalled("cargo") {
-			config.Logger.Printf("Trying to install feroxbuster using cargo...")
-			cmd = exec.Command("cargo", "install", "feroxbuster")
-		} else {
-			config.Logger.Printf(colorRed+"Cannot install feroxbuster automatically: No supported package manager (apt, yum, dnf, pacman) or cargo found."+colorReset)
-			return false // Explicitly return false
-		}
-		// If package manager worked, cmd will be nil here if installSuccess is true
-		if cmd == nil && !installSuccess {
-			// Fallback or error if no method chosen/failed
-			config.Logger.Printf(colorRed+"Failed to determine installation command for feroxbuster."+colorReset)
-			return false
-		} else if cmd == nil && installSuccess {
-            // Already installed via package manager, skip go install attempt
-             config.Logger.Printf(colorGreen+"Successfully installed %s via package manager."+colorReset, tool)
-             return true
-        }
-
 	case "nuclei":
-		cmd = exec.Command("go", "install", "-v", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest") // v3 is current
+		cmd = exec.Command("go", "install", "-v", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest")
 	case "subzy":
 		cmd = exec.Command("go", "install", "-v", "github.com/LukaSikic/subzy@latest")
 	case "qsreplace":
 		cmd = exec.Command("go", "install", "-v", "github.com/tomnomnom/qsreplace@latest")
 	case "gf":
 		cmd = exec.Command("go", "install", "-v", "github.com/tomnomnom/gf@latest")
-		// Remind user about gf patterns
-		defer func() {
-			config.Logger.Printf(colorYellow+"Note: 'gf' installed. Ensure you have gf patterns setup (e.g., clone https://github.com/tomnomnom/gf and run 'cp -r examples/* ~/.gf')."+colorReset)
+		defer func() { // Show note after potential install attempt
+			if isToolInstalled("gf") {
+				config.Logger.Printf(colorYellow + "Note: 'gf' installed. Ensure you have gf patterns setup (e.g., from https://github.com/tomnomnom/gf)." + colorReset)
+			}
 		}()
 	case "bxss":
 		cmd = exec.Command("go", "install", "-v", "github.com/ethicalhackingplayground/bxss@latest")
+
+	// --- Other Tools (Package Manager / Cargo) ---
+	case "feroxbuster":
+		pkgManagers := []struct {
+			name    string
+			updateCmd []string
+			installCmd []string
+		}{
+			{"apt-get", []string{"sudo", "apt-get", "update"}, []string{"sudo", "apt-get", "install", "-y", "feroxbuster"}},
+			{"yum", nil, []string{"sudo", "yum", "install", "-y", "feroxbuster"}}, // Assuming EPEL or base repo
+			{"dnf", nil, []string{"sudo", "dnf", "install", "-y", "feroxbuster"}},
+			{"pacman", []string{"sudo", "pacman", "-Sy"}, []string{"sudo", "pacman", "-S", "--noconfirm", "feroxbuster"}},
+		}
+
+		installedViaPkg := false
+		for _, pm := range pkgManagers {
+			if isToolInstalled(pm.name) {
+				config.Logger.Printf("Trying to install feroxbuster using %s...", pm.name)
+				// Run update command if specified
+				if pm.updateCmd != nil {
+					update := exec.Command(pm.updateCmd[0], pm.updateCmd[1:]...)
+					runInstallCommand(config, update, tool+" ("+pm.name+" update)") // Log output, don't fail install if update fails
+				}
+				// Run install command
+				install := exec.Command(pm.installCmd[0], pm.installCmd[1:]...)
+				if err := runInstallCommand(config, install, tool+" ("+pm.name+" install)"); err == nil {
+					installSuccess = true // Mark success
+					installedViaPkg = true
+					break // Stop checking other package managers
+				}
+			}
+		}
+
+		// If not installed via package manager, try cargo
+		if !installedViaPkg {
+			if isToolInstalled("cargo") {
+				config.Logger.Printf("Trying to install feroxbuster using cargo...")
+				cmd = exec.Command("cargo", "install", "feroxbuster")
+			} else {
+				config.Logger.Printf(colorRed + "Cannot install feroxbuster automatically: No supported package manager found, and cargo is not installed." + colorReset)
+				return false
+			}
+		}
+		// If installed via pkg manager, cmd remains nil, installSuccess is true
+
 	default:
 		config.Logger.Printf(colorRed+"Unknown tool for installation: %s"+colorReset, tool)
-		return false // Explicitly return false
+		return false
 	}
 
-    // If cmd is not nil, it means we need to run the command (likely go install or cargo)
-    if cmd != nil {
-        // Set GOPATH and GOBIN potentially, though 'go install' often works without them if go is set up
-	    // Set HOME environment variable for Go tools which might rely on ~/.config or similar
-	    homeDir, err := os.UserHomeDir()
-	    if err == nil {
-		    cmd.Env = append(os.Environ(), "HOME="+homeDir)
-            // Add GOBIN to PATH for the command's execution context if possible
-            goPath := os.Getenv("GOPATH")
-            if goPath == "" {
-                goPath = filepath.Join(homeDir, "go")
-            }
-            goBin := filepath.Join(goPath, "bin")
-            cmd.Env = append(cmd.Env, "PATH="+os.Getenv("PATH")+":"+goBin)
-	    }
+	// --- Execute the Determined Command (if not installed by package manager) ---
+	if cmd != nil {
+		// Set necessary environment variables for Go tools
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			cmd.Env = append(os.Environ(), "HOME="+homeDir)
+			goPath := os.Getenv("GOPATH")
+			if goPath == "" {
+				goPath = filepath.Join(homeDir, "go")
+			}
+			goBin := filepath.Join(goPath, "bin")
+			cmd.Env = append(cmd.Env, "PATH="+os.Getenv("PATH")+":"+goBin)
+		}
 
-
-	    if err := runInstallCommand(config, cmd, tool); err != nil {
-	        return false // Install failed
-        }
+		// Run the command (go install, cargo install, etc.)
+		if err := runInstallCommand(config, cmd, tool); err != nil {
+			return false // Command execution failed
+		}
+	} else if !installSuccess {
+        // This case should ideally not be reached if logic is correct,
+        // but indicates no install method was determined or pkg manager failed silently.
+         config.Logger.Printf(colorRed+"Failed to determine or execute an installation method for %s."+colorReset, tool)
+         return false
     }
 
 
-	// Final check if the tool is now installed
+	// --- Post-Installation Verification & Actions ---
+	time.Sleep(1 * time.Second) // Small delay for filesystem changes
 	if isToolInstalled(tool) {
 		config.Logger.Printf(colorGreen+"Successfully installed %s"+colorReset, tool)
-		// Special case for nuclei: try updating templates after install
+		// Special action for Nuclei: Update templates in the specified directory
 		if tool == "nuclei" {
-			config.Logger.Printf(colorYellow+"Running 'nuclei -update-templates'..." + colorReset)
-			updateCmd := exec.Command("nuclei", "-update-templates")
-			runInstallCommand(config, updateCmd, "nuclei-templates") // Log output but don't fail script if this errors
+			config.Logger.Printf(colorYellow+"Running 'nuclei -update-templates -td %s'..." + colorReset, config.NucleiTemplatesDir)
+			// Ensure the template dir exists before trying to update into it
+			_ = os.MkdirAll(config.NucleiTemplatesDir, 0755)
+			updateCmd := exec.Command("nuclei", "-update-templates", "-td", config.NucleiTemplatesDir)
+			runInstallCommand(config, updateCmd, "nuclei-templates update") // Log output, don't fail script if update fails
 		}
 		return true
 	} else {
-		config.Logger.Printf(colorRed+"Installation of %s seems to have failed (command not found after install attempt)."+colorReset, tool)
+		config.Logger.Printf(colorRed+"Installation of %s seems to have failed (command not found after install attempt). Check logs above."+colorReset, tool)
 		return false
 	}
 }
 
-// runInstallCommand executes the installation command and logs output/errors.
-func runInstallCommand(config *Config, cmd *exec.Cmd, toolName string) error {
+// runInstallCommand executes installation/utility commands and logs details.
+func runInstallCommand(config *Config, cmd *exec.Cmd, logPrefix string) error {
 	var outb, errb bytes.Buffer
 	cmd.Stdout = &outb
 	cmd.Stderr = &errb
 
-	config.Logger.Printf("Running install command: %s", cmd.String())
+	config.Logger.Printf("Running command for '%s': %s", logPrefix, cmd.String())
 	err := cmd.Run()
 
-	stdoutStr := outb.String()
-	stderrStr := errb.String()
+	stdoutStr := strings.TrimSpace(outb.String())
+	stderrStr := strings.TrimSpace(errb.String())
 
 	if stdoutStr != "" {
-		config.Logger.Printf("[%s install stdout]: %s", toolName, stdoutStr)
+		// Log multi-line output cleanly
+		scanner := bufio.NewScanner(strings.NewReader(stdoutStr))
+		for scanner.Scan() {
+			config.Logger.Printf("[%s stdout] %s", logPrefix, scanner.Text())
+		}
 	}
 	if stderrStr != "" {
-		config.Logger.Printf("[%s install stderr]: %s", toolName, stderrStr)
+		scanner := bufio.NewScanner(strings.NewReader(stderrStr))
+		for scanner.Scan() {
+			// Use Yellow for stderr that might not be critical errors
+			config.Logger.Printf(colorYellow+"[%s stderr] %s"+colorReset, logPrefix, scanner.Text())
+		}
 	}
 
 	if err != nil {
-		config.Logger.Printf(colorRed+"Failed to install/run %s: %v"+colorReset, toolName, err)
-		return err
+		config.Logger.Printf(colorRed+"Command for '%s' failed: %v"+colorReset, logPrefix, err)
+		return err // Propagate the error
 	}
+	config.Logger.Printf("Command for '%s' completed successfully.", logPrefix)
 	return nil
 }
 
-// --- createDirectories: Ensure necessary output subdirectories exist ---
+// --- createDirectories: Ensure output subdirectories exist ---
 func createDirectories(config *Config) {
-	// Define relative paths within the main output directory
 	dirs := []string{
-		"subfinder",
-		"httpx",
-		"urls",
-		"js",
-		"findings",
-		"feroxbuster", // Added specific dir for feroxbuster output
-		// "logs" directory is created in initialize()
+		"subfinder", "httpx", "urls", "js", "findings", "feroxbuster",
+		// "logs" created in initialize()
 	}
-
 	config.Logger.Println(colorBlue + "Creating output subdirectories..." + colorReset)
 	for _, dir := range dirs {
 		dirPath := filepath.Join(config.OutputDir, dir)
-		err := os.MkdirAll(dirPath, 0755) // 0755 permissions
-		if err != nil {
-			// Log error but continue, maybe permissions issue?
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			config.Logger.Printf(colorRed+"Error creating directory %s: %v"+colorReset, dirPath, err)
 		} else {
-			config.Logger.Printf("Created/verified directory: %s", dirPath)
+			// config.Logger.Printf("Created/verified directory: %s", dirPath) // Reduce verbosity
 		}
 	}
+     config.Logger.Printf("Output subdirectories checked/created in: %s", config.OutputDir)
+
 }
 
-// --- defineSteps: Configure all the security scanning steps ---
+// --- defineSteps: Configure all scanning steps ---
 func defineSteps(config *Config) []StepInfo {
 	// Define file paths relative to the output directory
 	subfinderOutput := filepath.Join(config.OutputDir, "subfinder", "subdomains.txt")
@@ -437,51 +446,40 @@ func defineSteps(config *Config) []StepInfo {
 	katanaOutput := filepath.Join(urlsDir, "katana.txt")
 	waybackOutput := filepath.Join(urlsDir, "wayback.txt")
 	otxOutput := filepath.Join(urlsDir, "otx.txt")
-	allUrlsOutput := filepath.Join(urlsDir, "all_urls_unsorted.txt") // Before sorting
-	sortedUrlsOutput := filepath.Join(urlsDir, "all_urls_sorted_unique.txt")
+	allUrlsUnsorted := filepath.Join(urlsDir, "all_urls_unsorted.txt")
+	allUrlsSorted := filepath.Join(urlsDir, "all_urls_sorted_unique.txt")
 	jsDir := filepath.Join(config.OutputDir, "js")
 	jsFileUrls := filepath.Join(jsDir, "js_files.txt")
 	findingsDir := filepath.Join(config.OutputDir, "findings")
 	secretsOutput := filepath.Join(findingsDir, "potential_secrets.txt")
 	jsFindingsOutput := filepath.Join(findingsDir, "js_nuclei_findings.txt")
-	// jsKatanaFindingsOutput := filepath.Join(findingsDir, "js_katana_findings.txt") // Merged into jsFindingsOutput
-	feroxbusterDirOutput := filepath.Join(config.OutputDir, "feroxbuster") // Directory for output
-	feroxbusterFileOutput := filepath.Join(feroxbusterDirOutput, fmt.Sprintf("feroxbuster_%s.txt", config.Domain))
+	feroxbusterDirOutput := filepath.Join(config.OutputDir, "feroxbuster")
+	feroxbusterFileOutput := filepath.Join(feroxbusterDirOutput, fmt.Sprintf("feroxbuster_%s.txt", strings.ReplaceAll(config.Domain, ".", "_"))) // Use domain in filename
 	xssOutput := filepath.Join(findingsDir, "xss_bxss.txt")
 	takeoverOutput := filepath.Join(findingsDir, "takeovers.txt")
 	misconfigsOutput := filepath.Join(findingsDir, "misconfigs_nuclei.json")
-	nucleiFindingsOutput := filepath.Join(findingsDir, "nuclei_findings.txt") // Use .txt for easier viewing/grepping initially
+	nucleiFindingsOutput := filepath.Join(findingsDir, "nuclei_findings.txt")
 	lfiOutput := filepath.Join(findingsDir, "lfi_nuclei.json")
 
-	// Use config.Threads for relevant flags
-	// Use sh -c for commands with pipes or redirection
-	// Ensure output files match the OutputFile field
-
+	// --- Define Steps with Updated Nuclei commands ---
 	steps := []StepInfo{
 		{
 			Name:        "1. Subdomain Discovery (subfinder)",
-			Description: "Discovering subdomains using subfinder (passive + recursive)",
-			// Use -all for more sources, -recursive for depth
+			Description: "Discovering subdomains using subfinder",
 			Command:     fmt.Sprintf("subfinder -d %s -o %s -all -recursive -silent", config.Domain, subfinderOutput),
 			OutputFile:  subfinderOutput,
 		},
 		{
 			Name:        "2. Subdomain Probing (httpx)",
 			Description: "Probing discovered subdomains for live HTTP/S servers",
-			// Output full URLs to alive.txt, host:port to alive_hosts.txt
-			// Use - H for adding custom headers if needed later
-			// Increased timeout slightly
 			Command: fmt.Sprintf("cat %s | httpx -ports 80,443,8080,8443,8000,8888 -threads %d -timeout 10 -silent -o %s -output-host-port %s",
 				subfinderOutput, config.Threads, httpxOutput, httpxHostsOutput),
-			OutputFile:   httpxOutput, // Main output is the URL list
-			RequiresPipe: true,        // Uses cat and pipe
+			OutputFile:   httpxOutput,
+			RequiresPipe: true,
 		},
 		{
 			Name:        "3. URL Collection (Katana)",
 			Description: "Crawling live sites for URLs using Katana",
-			// -jc for JS parsing, -kf for known files, -d depth, -c concurrency
-			// Exclude common non-interesting file types
-			// Input is the list of live URLs from httpx
 			Command: fmt.Sprintf("katana -list %s -d 5 -jc -kf -c %d -silent -ef woff,css,png,jpg,svg,ico,gif,jpeg,ttf,otf,eot -o %s",
 				httpxOutput, config.Threads, katanaOutput),
 			OutputFile: katanaOutput,
@@ -489,174 +487,175 @@ func defineSteps(config *Config) []StepInfo {
 		{
 			Name:        "4. URL Collection (Waybackurls)",
 			Description: "Fetching URLs from Wayback Machine archives",
-			// Input is the main domain
 			Command:      fmt.Sprintf("echo %s | waybackurls > %s", config.Domain, waybackOutput),
 			OutputFile:   waybackOutput,
-			RequiresPipe: true, // Uses echo and pipe/redirect
+			RequiresPipe: true,
 		},
 		{
 			Name:        "5. URL Collection (OTX)",
 			Description: "Fetching URLs from AlienVault OTX",
-			// Input is the main domain
-			Command:      fmt.Sprintf("echo %s | otxurls -s > %s", config.Domain, otxOutput), // Added -s for subdomains
+			Command:      fmt.Sprintf("echo %s | otxurls -s > %s", config.Domain, otxOutput),
 			OutputFile:   otxOutput,
-			RequiresPipe: true, // Uses echo and pipe/redirect
+			RequiresPipe: true,
 		},
 		{
 			Name:        "6. Consolidate & Sort URLs",
 			Description: "Combining URLs from all sources, sorting, and removing duplicates",
-			// Combine katana, wayback, otx outputs
 			Command: fmt.Sprintf("cat %s %s %s > %s && cat %s | sort -u > %s",
-				katanaOutput, waybackOutput, otxOutput, allUrlsOutput, allUrlsOutput, sortedUrlsOutput),
-			OutputFile:   sortedUrlsOutput,
-			RequiresPipe: true, // Uses cat, redirect, sort
+				katanaOutput, waybackOutput, otxOutput, allUrlsUnsorted, allUrlsUnsorted, allUrlsSorted),
+			OutputFile:   allUrlsSorted,
+			RequiresPipe: true,
 		},
 		{
 			Name:        "7. Secret Files Discovery (grep)",
 			Description: "Searching consolidated URLs for potentially sensitive file extensions",
-			// Improved regex, searching the sorted unique list
 			Command: fmt.Sprintf("cat %s | grep -E '\\.(log|txt|config|conf|cfg|ini|yml|yaml|json|sql|db|backup|bak|bkp|old|cache|secret|key|pem|csv|xls|xlsx|gz|tgz|zip|rar|7z)$' > %s",
-				sortedUrlsOutput, secretsOutput),
+				allUrlsSorted, secretsOutput),
 			OutputFile:   secretsOutput,
-			RequiresPipe: true, // Uses cat and pipe/redirect
+			RequiresPipe: true,
 		},
 		{
 			Name:        "8. JavaScript Files Collection (grep)",
 			Description: "Extracting JavaScript file URLs from the consolidated list",
-			// Search sorted unique list
 			Command: fmt.Sprintf("cat %s | grep -E '\\.js$' > %s",
-				sortedUrlsOutput, jsFileUrls),
+				allUrlsSorted, jsFileUrls),
 			OutputFile:   jsFileUrls,
-			RequiresPipe: true, // Uses cat and pipe/redirect
+			RequiresPipe: true,
 		},
 		{
 			Name:        "9. JavaScript Analysis (Nuclei)",
 			Description: "Analyzing collected JavaScript files for secrets and vulnerabilities",
-			// Use nuclei with relevant JS templates (exposures, secrets)
-			// -l points to the list of JS files
-			Command: fmt.Sprintf("nuclei -l %s -t exposures/,javascript/ -tags js,secret -severity medium,high,critical -c %d -stats -o %s",
-				jsFileUrls, config.Threads, jsFindingsOutput),
+			// Added -td flag for template directory
+			Command: fmt.Sprintf("nuclei -l %s -td %s -t exposures/,javascript/ -tags js,secret -severity medium,high,critical -c %d -stats -o %s",
+				jsFileUrls, config.NucleiTemplatesDir, config.Threads, jsFindingsOutput),
 			OutputFile: jsFindingsOutput,
 		},
-		// Step 10 (Katana JS analysis) is effectively covered by Step 9 if Katana finds JS files and they are fed into Nuclei. Removed for redundancy.
 		{
 			Name:        "10. Directory Bruteforce (feroxbuster)",
 			Description: "Bruteforcing directories and files on live web servers",
-			// Use the list of live HOSTS:PORT from httpx
-			// Use configured wordlist, adjust extensions, add status codes to ignore
-			// Output to a specific file in the feroxbuster directory
 			Command: fmt.Sprintf("feroxbuster --stdin --wordlist %s --threads %d --depth 3 --status-codes 200,301,302,401 --filter-status 404,403,500 --silent --output %s < %s",
-				config.WordlistPath, config.Threads, feroxbusterFileOutput, httpxHostsOutput), // Read targets from stdin
+				config.WordlistPath, config.Threads, feroxbusterFileOutput, httpxHostsOutput),
 			OutputFile:   feroxbusterFileOutput,
-			RequiresPipe: true, // Uses < redirection
+			RequiresPipe: true,
 		},
 		{
 			Name:        "11. XSS Scan (gf + bxss)",
 			Description: "Scanning found URLs for potential XSS vulnerabilities using gf patterns and bxss",
-			// Requires gf patterns to be installed correctly (esp. xss pattern)
-			// Use sorted URL list, filter with gf, then test with bxss
 			Command: fmt.Sprintf("cat %s | gf xss | bxss -append -payload '\"<script>alert(1)</script>' -threads %d > %s",
-				sortedUrlsOutput, config.Threads, xssOutput),
+				allUrlsSorted, config.Threads, xssOutput),
 			OutputFile:   xssOutput,
-			RequiresPipe: true, // Uses cat, gf, bxss pipes/redirect
+			RequiresPipe: true,
 		},
 		{
 			Name:        "12. Subdomain Takeover Check (subzy)",
 			Description: "Checking discovered subdomains for potential takeover vulnerabilities",
-			// Use the original subfinder output
-			// Corrected flag to --output
 			Command: fmt.Sprintf("subzy run --targets %s --concurrency %d --hide_fails --verify_ssl --output %s",
-				subfinderOutput, config.Threads*2, takeoverOutput), // Subzy might handle more concurrency
+				subfinderOutput, config.Threads*2, takeoverOutput),
 			OutputFile: takeoverOutput,
 		},
 		{
 			Name:        "13. Misconfig/Exposure Scan (Nuclei)",
 			Description: "Scanning live hosts for common misconfigurations and exposures",
-			// Use alive URLs list, relevant nuclei templates/tags
-			// Output in JSON format for potential parsing later
-			Command: fmt.Sprintf("nuclei -l %s -tags misconfig,exposure,config,auth-bypass,cors -severity medium,high,critical -rate-limit 150 -c %d -timeout 10 -stats -j -irr -o %s",
-				httpxOutput, config.Threads, misconfigsOutput),
+			// Added -td flag
+			Command: fmt.Sprintf("nuclei -l %s -td %s -tags misconfig,exposure,config,auth-bypass,cors -severity medium,high,critical -rate-limit 150 -c %d -timeout 10 -stats -j -irr -o %s",
+				httpxOutput, config.NucleiTemplatesDir, config.Threads, misconfigsOutput),
 			OutputFile: misconfigsOutput,
 		},
 		{
 			Name:        "14. CVEs & Tech Scan (Nuclei)",
 			Description: "Scanning for known CVEs, technology detection, and OSINT",
-			// Use alive URLs list, relevant tags
-			Command: fmt.Sprintf("nuclei -l %s -tags cve,tech,osint -severity medium,high,critical,info -etags ssl -c %d -stats -o %s",
-				httpxOutput, config.Threads, nucleiFindingsOutput),
+			// Added -td flag
+			Command: fmt.Sprintf("nuclei -l %s -td %s -tags cve,tech,osint -severity medium,high,critical,info -etags ssl -c %d -stats -o %s",
+				httpxOutput, config.NucleiTemplatesDir, config.Threads, nucleiFindingsOutput),
 			OutputFile: nucleiFindingsOutput,
 		},
 		{
 			Name:        "15. LFI Scan (gf + qsreplace + Nuclei)",
 			Description: "Testing URLs for potential Local File Inclusion vulnerabilities",
-			// Filter URLs likely to have parameters, replace values, test with Nuclei LFI templates
-			Command: fmt.Sprintf("cat %s | gf lfi | qsreplace '/etc/passwd' | nuclei -tags lfi,file-inclusion -severity medium,high,critical -c %d -stats -irr -j -o %s",
-				sortedUrlsOutput, config.Threads, lfiOutput),
+			// Added -td flag
+			Command: fmt.Sprintf("cat %s | gf lfi | qsreplace '/etc/passwd' | nuclei -td %s -tags lfi,file-inclusion -severity medium,high,critical -c %d -stats -irr -j -o %s",
+				allUrlsSorted, config.NucleiTemplatesDir, config.Threads, lfiOutput),
 			OutputFile:   lfiOutput,
-			RequiresPipe: true, // Uses cat, gf, qsreplace, nuclei pipes/redirect
+			RequiresPipe: true,
 		},
 	}
 
 	return steps
 }
 
+
 // --- runAllSteps: Execute each defined step sequentially ---
 func runAllSteps(config *Config, steps []StepInfo) {
 	totalSteps := len(steps)
-	for i := range steps { // Use index access to modify steps[i].Completed
-		step := &steps[i] // Get a pointer to modify the slice element
+	for i := range steps {
+		step := &steps[i]
 
 		config.Logger.Printf(colorCyan+"[%d/%d] Starting: %s"+colorReset, i+1, totalSteps, step.Name)
 		config.Logger.Printf(colorBlue+"--> Description: %s"+colorReset, step.Description)
 		config.Logger.Printf(colorBlue+"--> Output File: %s"+colorReset, step.OutputFile)
 
-		// Check if step should be skipped
-		if !config.Force && isStepCompleted(step.OutputFile) {
+		// Check skip conditions
+		outputExists := fileExists(step.OutputFile) // Check existence separately
+		outputNotEmpty := isStepCompleted(step.OutputFile) // Checks existence AND size > 0
+
+		if !config.Force && outputNotEmpty {
 			config.Logger.Printf(colorYellow+"Skipping: Output file '%s' already exists and is not empty. Use --force to rerun."+colorReset, step.OutputFile)
 			step.Completed = true
+			config.Logger.Println("---")
 			continue
 		}
+        // If forcing, or file doesn't exist, or file exists but is empty, proceed.
+        if config.Force && outputExists {
+             config.Logger.Printf(colorYellow+"Note: --force is enabled, rerunning step even though output '%s' exists."+colorReset, step.OutputFile)
+        } else if !config.Force && outputExists && !outputNotEmpty {
+            config.Logger.Printf(colorYellow+"Note: Output file '%s' exists but is empty. Rerunning step."+colorReset, step.OutputFile)
+        }
 
-		// Ensure output directory exists before running the command
+
+		// Ensure output directory exists
 		outputDir := filepath.Dir(step.OutputFile)
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			config.Logger.Printf(colorRed+"Error: Cannot create output directory '%s' for step %d: %v. Skipping step."+colorReset, outputDir, i+1, err)
-			step.Completed = false // Mark as not completed
-			continue              // Skip to next step
+			step.Completed = false
+			config.Logger.Println("---")
+			continue
 		}
 
 		// Run the step
 		startTime := time.Now()
-		err := runStep(config, *step) // Pass the value
+		err := runStep(config, *step)
 		duration := time.Since(startTime)
 
+		// Evaluate result
 		if err != nil {
 			config.Logger.Printf(colorRed+"Error running step [%d/%d] %s: %v (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, err, duration.Round(time.Second))
-			step.Completed = false // Mark as failed
-
-			// Check if the output file exists but might be empty due to error
-			info, statErr := os.Stat(step.OutputFile)
-			if statErr == nil && info.Size() == 0 {
-				config.Logger.Printf(colorYellow+"Note: Output file '%s' was created but is empty, likely due to the error."+colorReset, step.OutputFile)
-			} else if statErr != nil && !os.IsNotExist(statErr) {
-				config.Logger.Printf(colorYellow+"Note: Could not check status of output file '%s': %v"+colorReset, step.OutputFile, statErr)
-			}
-
+			step.Completed = false
+			// Check if output file is empty after error
+            if fileExists(step.OutputFile) && !isStepCompleted(step.OutputFile) {
+                 config.Logger.Printf(colorYellow+"Note: Output file '%s' was created but is empty, likely due to the error."+colorReset, step.OutputFile)
+            }
 		} else {
-			// Check if output file was actually created and has content
+			// Step command succeeded (exit 0), now check output file
 			if !isStepCompleted(step.OutputFile) {
-				config.Logger.Printf(colorYellow+"Warning: Step [%d/%d] %s completed without errors, but output file '%s' is missing or empty. (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, step.OutputFile, duration.Round(time.Second))
-				// Consider it 'completed' in terms of execution, but maybe not successfully in terms of output.
-				// Keep Completed = true for now, but this indicates a potential issue with the command itself.
-				step.Completed = true
+				// Command ran OK, but no output produced/found
+				config.Logger.Printf(colorYellow+"Warning: Step [%d/%d] %s completed without errors, but output file '%s' is missing or empty. Tool might have found nothing. (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, step.OutputFile, duration.Round(time.Second))
+				step.Completed = true // Mark as run
 			} else {
+				// Command ran OK and output file looks good
 				config.Logger.Printf(colorGreen+"Success: Step [%d/%d] %s completed successfully. (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, duration.Round(time.Second))
 				step.Completed = true
 			}
 		}
-		config.Logger.Println("---") // Separator between steps
+		config.Logger.Println("---") // Separator
 	}
 }
+
+// --- fileExists: Check if a file exists ---
+func fileExists(filePath string) bool {
+    _, err := os.Stat(filePath)
+    return err == nil // True if exists, false if not exist or other error
+}
+
 
 // --- isStepCompleted: Check if the output file exists and is not empty ---
 func isStepCompleted(outputFile string) bool {
@@ -664,7 +663,6 @@ func isStepCompleted(outputFile string) bool {
 	if err != nil {
 		return false // File doesn't exist or other error
 	}
-	// Consider a file with zero size as not *successfully* completed in terms of output
 	return info.Size() > 0
 }
 
@@ -673,51 +671,38 @@ func runStep(config *Config, step StepInfo) error {
 	config.Logger.Printf("Executing command: %s", step.Command)
 
 	var cmd *exec.Cmd
-	// Use sh -c ONLY if the command requires pipes or redirection
 	if step.RequiresPipe {
 		cmd = exec.Command("sh", "-c", step.Command)
 	} else {
-		// Simple command, split manually (basic split is fine here as complex cases use sh -c)
 		parts := strings.Fields(step.Command)
-		if len(parts) == 0 {
-			return fmt.Errorf("empty command")
-		}
+		if len(parts) == 0 { return fmt.Errorf("empty command") }
 		cmd = exec.Command(parts[0], parts[1:]...)
 	}
 
-	// Capture stderr for logging errors
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	// We don't capture stdout here because for piped/redirected commands,
-	// 'sh -c' handles writing to the step.OutputFile directly.
-	// For simple commands, their own '-o' flags handle output.
-
-	// Start the command
 	err := cmd.Start()
 	if err != nil {
-		// Log stderr if available even if start fails
-		if stderr.Len() > 0 {
-			config.Logger.Printf(colorRed+"[stderr] %s"+colorReset, stderr.String())
-		}
+		if stderr.Len() > 0 { config.Logger.Printf(colorRed+"[stderr] %s"+colorReset, stderr.String()) }
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Wait for the command to finish
 	err = cmd.Wait()
 
-	// Log stderr if there was any error output, regardless of exit code
 	if stderr.Len() > 0 {
-		config.Logger.Printf(colorYellow+"[stderr] %s"+colorReset, stderr.String())
+		// Log stderr lines individually for better readability
+		scanner := bufio.NewScanner(&stderr)
+		for scanner.Scan() {
+			config.Logger.Printf(colorYellow+"[stderr] %s"+colorReset, scanner.Text())
+		}
 	}
 
 	if err != nil {
-		// Return the error including exit code information
-		return fmt.Errorf("command exited with error: %w", err)
+		return fmt.Errorf("command exited with error: %w", err) // Includes exit code info
 	}
 
-	// Command finished successfully (exit code 0)
-	return nil
+	return nil // Exit code 0
 }
 
 // --- printSummary: Display a summary of the scan results ---
@@ -725,6 +710,8 @@ func printSummary(config *Config, steps []StepInfo) {
 	config.Logger.Println(colorPurple + "\n===== BugBusterPro Scan Summary =====" + colorReset)
 	config.Logger.Printf("Domain: %s", config.Domain)
 	config.Logger.Printf("Output Directory: %s", config.OutputDir)
+    config.Logger.Printf("Wordlist Used: %s", config.WordlistPath)
+    config.Logger.Printf("Nuclei Templates Dir: %s", config.NucleiTemplatesDir)
 	config.Logger.Printf("Scan End Time: %s", time.Now().Format("2006-01-02 15:04:05"))
 
 	completedCount := 0
@@ -733,36 +720,38 @@ func printSummary(config *Config, steps []StepInfo) {
 
 	config.Logger.Println(colorCyan + "\n--- Step Status ---" + colorReset)
 	for i, step := range steps {
-		status := colorRed + "[Failed/Skipped]" + colorReset
-		if step.Completed {
-			// Further check if the output file is valid
-			if isStepCompleted(step.OutputFile) {
-				status = colorGreen + "[Completed]" + colorReset
+		status := ""
+		stepRan := step.Completed // Did the step's execution attempt finish?
+
+		if stepRan {
+            if isStepCompleted(step.OutputFile) {
+                status = colorGreen + "[Completed]" + colorReset
 				completedCount++
-			} else {
-				// Completed execution but no output file
-				status = colorYellow + "[Completed (No Output)]" + colorReset
-				completedCount++ // Count it as run, but flag it
-				emptyOutputSteps = append(emptyOutputSteps, fmt.Sprintf("%d. %s (%s)", i+1, step.Name, step.OutputFile))
-			}
-		} else {
-			// Didn't complete execution (error or skipped due to force=false and existing file initially)
-			// Check if it was skipped initially vs failed during run
-			if !config.Force && isStepCompleted(step.OutputFile) {
-				// This case shouldn't happen if logic is right, but as a safeguard
-				status = colorYellow + "[Skipped (Output Exists)]" + colorReset
-				completedCount++ // It was effectively completed in a prior run
-			} else {
-				failedSteps = append(failedSteps, fmt.Sprintf("%d. %s", i+1, step.Name))
-			}
-		}
+            } else {
+                // Step ran but output is missing/empty
+                status = colorYellow + "[Completed (No Output)]" + colorReset
+                emptyOutputSteps = append(emptyOutputSteps, fmt.Sprintf("%d. %s (%s)", i+1, step.Name, step.OutputFile))
+				completedCount++ // Count as run, but flag it
+            }
+        } else {
+            // Step didn't run successfully (error during execution OR skipped by --force=false logic)
+            if !config.Force && isStepCompleted(step.OutputFile) {
+                // It was skipped because output existed and force was false
+                status = colorYellow + "[Skipped (Output Exists)]" + colorReset
+				completedCount++ // Count as completed in a prior run
+            } else {
+                // It failed during execution
+                status = colorRed + "[Failed]" + colorReset
+                failedSteps = append(failedSteps, fmt.Sprintf("%d. %s", i+1, step.Name))
+            }
+        }
 		config.Logger.Printf("%s %s", status, step.Name)
 	}
 
-	config.Logger.Printf("\nSteps Run/Total: %d/%d", completedCount, len(steps))
+	config.Logger.Printf("\nSteps Run/Succeeded/Total: %d/%d", completedCount, len(steps)) // Simplified count
 
 	if len(failedSteps) > 0 {
-		config.Logger.Println(colorRed + "\n--- Failed/Skipped Steps ---" + colorReset)
+		config.Logger.Println(colorRed + "\n--- Failed Steps ---" + colorReset)
 		for _, failed := range failedSteps {
 			config.Logger.Printf("- %s", failed)
 		}
@@ -774,21 +763,23 @@ func printSummary(config *Config, steps []StepInfo) {
 		for _, empty := range emptyOutputSteps {
 			config.Logger.Printf("- %s", empty)
 		}
-		config.Logger.Println(colorYellow + "These steps ran without error, but their expected output file is empty or was not created. The respective tool might not have found anything, or there could be an issue with the tool/command itself." + colorReset)
+		config.Logger.Println(colorYellow + "These steps ran without error, but their expected output file is empty or was not created. The tool might not have found anything." + colorReset)
 	}
 
-	if completedCount == len(steps) && len(failedSteps) == 0 && len(emptyOutputSteps) == 0 {
+	if len(failedSteps) == 0 && len(emptyOutputSteps) == 0 {
 		config.Logger.Println(colorGreen + "\nAll steps completed successfully!" + colorReset)
-	} else {
-		config.Logger.Println(colorYellow + "\nScan finished, but some steps failed or produced no output. Please review the logs." + colorReset)
+	} else if len(failedSteps) == 0 && len(emptyOutputSteps) > 0 {
+        config.Logger.Println(colorYellow + "\nAll steps ran without errors, but some produced no output. Review the 'No Output' list and logs." + colorReset)
+    } else {
+		config.Logger.Println(colorYellow + "\nScan finished, but some steps failed. Please review the logs." + colorReset)
 	}
 
 	// List significant output files found
-	config.Logger.Println(colorCyan + "\n--- Key Output Files (if generated) ---" + colorReset)
+	config.Logger.Println(colorCyan + "\n--- Key Output Files (if generated and not empty) ---" + colorReset)
 	significantFiles := []string{}
 	for _, step := range steps {
-		// Only list files that were expected to be created and actually exist with content
-		if step.Completed && isStepCompleted(step.OutputFile) {
+		// Only list files that exist and have content
+		if isStepCompleted(step.OutputFile) {
 			significantFiles = append(significantFiles, step.OutputFile)
 		}
 	}
@@ -799,11 +790,11 @@ func printSummary(config *Config, steps []StepInfo) {
 			if err == nil {
 				config.Logger.Printf("- %s (%.2f KB)", file, float64(fileInfo.Size())/1024.0)
 			} else {
-				config.Logger.Printf("- %s (Error getting stats: %v)", file, err) // Should not happen if isStepCompleted passed
+				config.Logger.Printf("- %s (Error getting stats: %v)", file, err)
 			}
 		}
 	} else {
-		config.Logger.Println("No significant output files were generated or found.")
+		config.Logger.Println("No significant output files were found (or they were empty).")
 	}
 
 	config.Logger.Println(colorPurple + "\n===== End of Summary =====" + colorReset)
